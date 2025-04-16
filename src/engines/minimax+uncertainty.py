@@ -175,16 +175,16 @@ class MinimaxDistMCTS:
         self.fpu_reduction = fpu_reduction
         # Create the root node - no parent, no move leading to it
         self.root = Node(parent=None, move=None, board=initial_board.copy(), prior_policy=0.0)
+        self.tree_size = 1
 
     def search(self):
         """Runs the MCTS search for a given number of simulations."""
-        counter  = 3
-        while self.root.uncertainty > uncertainty_threshold*np.log(counter):
+        while self.root.uncertainty > uncertainty_threshold*np.log(self.tree_size) or threshold_delta*1000 < uncertainty_threshold*np.log(self.tree_size):
             leaf_node, reach_prob = self._select(self.root)
+            threshold_delta = reach_prob*leaf_node.uncertainty #this is roughly proportional to the maximum we can hope to change the uncertainty in a single search.
             # Value returned by expand is from the perspective of the leaf_node
-            new_leaf_node = self._expand(leaf_node,threshold = uncertainty_threshold)
+            new_leaf_node = self._expand(leaf_node, 1, threshold = (leaf_node.uncertainty + uncertainty_threshold)/2)#try to half the amount of unvertainty
             self._backup(new_leaf_node)
-            counter +=1
 
     def _select(self, node: Node) -> Node:
         """Selects a leaf node starting from the given node using PUCT.
@@ -240,7 +240,7 @@ class MinimaxDistMCTS:
         uncertainty, favorite_child = self._expand_helper(node)
         #really the helper builds a while loop so probably should change to a while loop at some point
 
-        if reach_prob * uncertainty <threshold:
+        if uncertainty <threshold*np.log(1/reach_prob):
             return node
         if favorite_child:
             return self._expand(favorite_child, reach_prob * node.edge_prob[favorite_child.move], threshold)
@@ -294,6 +294,7 @@ class MinimaxDistMCTS:
         for move in node.legal_moves:
             move_policy = policy_dict.get(move, 0.0) # Use get for safety, default to 0 if move not in policy
             if move_policy > move_policy_cutoff:
+                self.tree_size +=1
                 # Create the child board state
                 child_board = node.board.copy()
                 try:
