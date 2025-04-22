@@ -32,7 +32,7 @@ class Node:
         self.terminal_value: Optional[float] = None # Outcome if terminal (1=win, -1=loss, 0=draw for player *at this node*)
         self.expanded = False
         self.reach_prob: float = 1.0
-        self.branch_entropy: float = 1.0
+        self.branch_perplexity: float = 1.0
         self.player_turn: bool = board.turn
 
         #variables for edge coming into
@@ -49,7 +49,7 @@ class Node:
         self.edge_prob: Dict[chess.Move float] = {}
         self.sum_edge_prob: float = 0.0
         self.expanded_children_policy_total: float = 0.0
-        self.child_edge_entropy: float = 1.0
+        self.child_edge_perplexity: float = 1.0
 
         #main variables
         #
@@ -204,7 +204,7 @@ class MinimaxDistMCTS:
         repeat 1-3
 
         threshold*: .05*(reach_prob)
-        or better: .05*Prod(vertices v above p) (1+entropy of the v)^{-1}. entropy is an approximation of the 
+        or better: .05*Prod(vertices v above p) (perplexity). perplexity is an approximation of the 
 
 
         when to end search:
@@ -216,14 +216,16 @@ class MinimaxDistMCTS:
             so we should stop when
             C*remaining updates*update time < (remaining time)/2 if increment then (remaining time)/2 + incrememnt
         """
-
-        while not self.stopping_condition():
-            #step 3:
-            self._update_reach_probabilities(self.root)
+        Add root to heap.
+        #create whatever needed to create tree
+        while not self.stopping_condition(uncertainty_delta = max of heap):
             #step 1:
             self._expand_tree()
             #step 2:
             self._backup_alpha_beta()
+            #step 3:
+            self.root.branch_perplexity = 1
+            self._update_reach_probabilities(self.root)
 
     def stopping_condition(self, uncertainty_delta: float) -> bool:
         """
@@ -246,38 +248,6 @@ class MinimaxDistMCTS:
             return True
         return False
 
-    def _update_reach_probabilities(self, parent: Node):
-        """
-        Updates the reach probabilities of the nodes in the tree and the entropies
-        """
-        if parent.is_leaf():
-            #add to the max heap for expand
-            return
-        
-        parent.sum_edge_prob  = 0
-        #compute new edge probabilities
-        for child in node.children:
-            alpha = np.sqrt(parent.number_of_visits)/(np.sqrt(parent.number_of_visits)+child.number_of_visits/self.c_puct)
-            parent.edge_prob[child.move] = alpha*parent.edge_policy_values[child.move] + (1-alpha) * self.prob_child_maximizes(child.val_cdf,parent.val_cdf)
-            parent.sum_edge_prob += parent.edge_prob[child.move]
-
-        #normalize and compute entropy
-        parent.child_edge_entropy = 1.0
-        for child in parent.children:
-            parent.edge_prob[child.move] /= parent.sum_edge_prob
-            if parent.edge_prob[child.move] <0.05:
-                #TODO delete the edge and child.
-            else:
-                parent.child_edge_entropy -= parent.edge_prob[child.move]*np.ln(parent.edge_prob[child.move])
-        parent.entropy *= parent.child_edge_entropy
-
-        #recurse on children
-        for child in parent.children:
-            child.reach_prob = parent.reach_prob * parent.edge_prob[child.move]
-            child.entropy = parent.entropy
-            self._update_reach_probabilities(child)
-
-
     def _expand_tree(self, N_bound: float, u_bound: float):#whole function TODO
         """
         Expands the tree by selecting by leaves via a max-heap for uncertainty*reach_prob
@@ -289,6 +259,7 @@ class MinimaxDistMCTS:
             #pop the head of the max-heap
 
             if blah < u_bound:
+                #stop expanding
                 return
             
             #expands the popped node
@@ -322,11 +293,11 @@ class MinimaxDistMCTS:
             minimax *= child_cdf
             if node.player_turn:
                 alpha = max(alpha, median(minimax))
-                if probability_less_than(minimax, 1-beta, .025*node.branch_entropy):
+                if probability_less_than(minimax, 1-beta, .05*node.branch_perplexity):
                     return np.ones(self.num_bins), True
             else:
                 beta = max(beta, median(minimax))
-                if probability_less_than(minimax, 1-alpha, .025*node.branch_entropy):
+                if probability_less_than(minimax, 1-alpha, .05*node.branch_perplexity):
                     return np.ones(self.num_bins), True
         #update parent distribution
         node.minimax_val_cdf = minimax
@@ -334,7 +305,37 @@ class MinimaxDistMCTS:
 
         return node.val_cdf, False
             
+    def _update_reach_probabilities(self, parent: Node):
+        """
+        Updates the reach probabilities of the nodes in the tree and the entropies
+        """
+        if parent.is_leaf():
+            #add to the max heap for expand
+            return
         
+        parent.sum_edge_prob  = 0
+        #compute new edge probabilities
+        for child in parent.children:
+            alpha = np.sqrt(parent.number_of_visits)/(np.sqrt(parent.number_of_visits)+child.number_of_visits/self.c_puct)
+            parent.edge_prob[child.move] = alpha*parent.edge_policy_values[child.move] + (1-alpha) * self.prob_child_maximizes(child.val_cdf,parent.val_cdf)
+            parent.sum_edge_prob += parent.edge_prob[child.move]
+
+        #normalize and compute perplexity
+        parent.child_edge_perplexity = 1.0
+        for child in parent.children:
+            parent.edge_prob[child.move] /= parent.sum_edge_prob
+            if parent.edge_prob[child.move] <0.05:
+                #TODO delete the edge and child.
+            else:
+                parent.child_edge_perplexity *= parent.edge_prob[child.move]**(-parent.edge_prob[child.move])
+                child.reach_prob = parent.reach_prob * parent.edge_prob[child.move]
+        parent.branch_perplexity *= parent.child_edge_perplexity
+
+        #recurse on children
+        for child in parent.children:
+            child.branch_perplexity = parent.branch_perplexity
+            self._update_reach_probabilities(child)
+   
 
     def _expand_node(self, node: Node) -> List[Node]:
         """
@@ -371,7 +372,7 @@ class MinimaxDistMCTS:
         # The NN value is from the perspective of the current player at node.board
         policy_dict, value, variance, draw, draw_variance = self.nn_evaluate(node.board)
         
-        node.first_NN_update(node.value,node.variance,node.draw,node.draw_variance)
+        node.first_NN_update(value,variance,draw,draw_variance)
 
         # Populate children based on legal moves and policy network output
         for move in node.legal_moves:
@@ -390,8 +391,6 @@ class MinimaxDistMCTS:
                     # Decide how to handle invalid moves predicted by policy, e.g., skip
                     continue
         
-        
-        favorite_move = max(node.edge_prob, key=node.edge_prob.get)
 
 
 
