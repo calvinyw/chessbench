@@ -26,6 +26,7 @@ class PVSSearch(SearchAlgorithm):
     def __init__(self):
         super().__init__("pvs")
         self.tt_hits = 0  # Track transposition table hits
+        self.root_depth = 0.0  # Store the root depth
 
     def reset_metrics(self):
         """Reset engine metrics."""
@@ -47,6 +48,7 @@ class PVSSearch(SearchAlgorithm):
         # Store inference function for use in node creation
         self.inference_func = inference_func
         self.tt_hits = 0  # Reset TT hit counter
+        self.root_depth = depth  # Store the initial depth
         
         # Create root node
         root = self._create_node(board, inference_func)
@@ -129,25 +131,50 @@ class PVSSearch(SearchAlgorithm):
 
         # Multiply likelihood with the variance of this node
         depth_reduction = -2 * math.log(node.U + 1e-6)
-        
-        # Leaf node evaluation
-        total_move_weight = 0
+
+        #this is the window of the depths we would like to end in: i.e. from depth_reduction to depth_reduction + depth_window.
+        depth_window = -.4
+        #this is the window of the depths we would like to end in: i.e. from depth_reduction to depth_reduction + depth_window.
+        #the width of this window is roughly probability 2/3. So it is pretty narrow.
+
+        #reduction_error is the difference between the depth_reduction between the node and its children
+        reduction_error = -depth_reduction/20
+        #putting at 5% the current depth reduction
+
+
+        #compare entropy before versus after expanding:
+        entropy_before = (self.root_depth -depth)
+        entropy_after = 0
         weight_divisor = 1.0
+        new_depths = []
+        count = 0
+        total_move_weight = 0
         unexpanded_count = 0
-        for i, (move, prob, child_node) in enumerate(node.policy):
-            if child_node is None:
+        for i, (move, move_weight, child_node) in enumerate(node.policy):
+            assert move_weight > 0.0
+            total_move_weight += move_weight
+            # Compute new depth with policy extension
+            new_depth = depth + math.log(move_weight + 1e-6)  - 0.1
+            if new_depth < depth_reduction + depth_window + reduction_error and child_node is None:
                 new_board = board.copy()
                 new_board.push(move)
                 if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
-                    if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
-                        weight_divisor -= prob
-                    else:
-                        unexpanded_count += 1
-            
-            total_move_weight += prob
-
-        if node.is_leaf() and depth <= math.log(unexpanded_count + 1e-6) + depth_reduction:
-            return node.value, None
+                    weight_divisor -= move_weight
+            else:
+                if child_node is None:
+                    new_board = board.copy()
+                    new_board.push(move)
+                    if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
+                        unexpanded_count +=1
+                entropy_after += max((self.root_depth- depth_reduction), self.root_depth - new_depth)*move_weight
+                new_depths.append(new_depth)
+                total_move_weight += move_weight
+                count += 1
+        
+        # Leaf node evaluation
+        if node.is_leaf():
+            if depth <= depth_reduction or entropy_before>entropy_after:
+                return node.value, None
         
         # Safety check against excessive recursion
         if rec_depth > 50:
@@ -174,13 +201,12 @@ class PVSSearch(SearchAlgorithm):
                 best_move_depth = new_depth
             
             # Skip low probability moves if depth is too low
-            if new_depth <= depth_reduction and child_node is None:
-                if (total_move_weight > 0.80 and i >= 2) or (total_move_weight > 0.95 and i >= 1):
-                    new_board = board.copy()
-                    new_board.push(move)
-                    if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
-                        total_move_weight += move_weight
-                        continue
+            if i>count and child_node is None:
+                new_board = board.copy()
+                new_board.push(move)
+                if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
+                    total_move_weight += move_weight
+                    continue
             
             # Create child node if needed
             if child_node is None:
