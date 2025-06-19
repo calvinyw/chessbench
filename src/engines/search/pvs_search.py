@@ -139,7 +139,7 @@ class PVSSearch(SearchAlgorithm):
 
         #reduction_error is the difference between the depth_reduction between the node and its children
         reduction_error = -depth_reduction/20
-        #putting at 5% the current depth reduction
+        #putting at 2% the current depth reduction
 
 
         #compare entropy before versus after expanding:
@@ -155,18 +155,24 @@ class PVSSearch(SearchAlgorithm):
             total_move_weight += move_weight
             # Compute new depth with policy extension
             new_depth = depth + math.log(move_weight + 1e-6)  - 0.1
-            if new_depth < depth_reduction + depth_window + reduction_error and child_node is None:
-                new_board = board.copy()
-                new_board.push(move)
-                if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
-                    weight_divisor -= move_weight
+            if new_depth < depth_reduction + depth_window + reduction_error:
+                if child_node is None:
+                    new_board = board.copy()
+                    new_board.push(move)
+                    if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
+                        weight_divisor -= move_weight
+                else:
+                    entropy_after += max((self.root_depth- depth_reduction), self.root_depth - new_depth)*(move_weight*1.05)
+                    #added a 1.05 to account for the machines error loading these things.
+                    total_move_weight += move_weight
             else:
                 if child_node is None:
                     new_board = board.copy()
                     new_board.push(move)
                     if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
                         unexpanded_count +=1
-                entropy_after += max((self.root_depth- depth_reduction), self.root_depth - new_depth)*move_weight
+                entropy_after += max((self.root_depth- depth_reduction), self.root_depth - new_depth)*(move_weight*1.05)
+                #added a 1.05 to account for the machines error loading these things.
                 new_depths.append(new_depth)
                 total_move_weight += move_weight
                 count += 1
@@ -186,27 +192,23 @@ class PVSSearch(SearchAlgorithm):
         max_eval = -float('inf')
         history[position_key] += 1
         
-        total_move_weight = 0
         best_move_depth = None
         best_move = None
         original_alpha = alpha
         
         for i, (move, move_weight, child_node) in enumerate(node.policy):
             assert move_weight > 0.0
-
-            # Compute new depth with policy extension
-            new_depth = depth + math.log(move_weight + 1e-6) - math.log(weight_divisor + 1e-6) - 0.1
-
-            if best_move_depth is None:
-                best_move_depth = new_depth
-            
             # Skip low probability moves if depth is too low
             if i>count and child_node is None:
                 new_board = board.copy()
                 new_board.push(move)
                 if self._create_node(new_board, parent=node, tt=tt, soft_create=True) is None:
-                    total_move_weight += move_weight
                     continue
+            # Compute new depth with policy extension
+            new_depth = depth + math.log(move_weight + 1e-6) - math.log(max(1e-6,weight_divisor + 1e-6)) - 0.1
+
+            if best_move_depth is None:
+                best_move_depth = new_depth
             
             # Create child node if needed
             if child_node is None:
