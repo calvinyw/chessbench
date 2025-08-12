@@ -285,7 +285,7 @@ class PVSSearch(SearchAlgorithm):
                 child_node = self._create_node(child_board, inference_func=self.inference_func, parent=node, tt=tt, parent_move=move)
                 node.add_child(child_node, move)
 
-                self._backpropagate_policy_updates(child_node, max_eval, move=move)
+                self._one_step_backpropagate_policy_updates(child_node, max_eval, move=move)
 
             child_re_searches = 0
             RE_SEARCH_DEPTH = 0.2
@@ -398,7 +398,7 @@ class PVSSearch(SearchAlgorithm):
         
         return max_eval, best_move
     
-    def _backpropagate_policy_updates(self, new_node: Node, max_eval: float, move: Optional[chess.Move] = None):
+    def _one_step_backpropagate_policy_updates(self, new_node: Node, max_eval: float, move: Optional[chess.Move] = None):
         """
         Backpropagate policy updates from a newly created node up to the root.
         
@@ -428,13 +428,17 @@ class PVSSearch(SearchAlgorithm):
         if not found_policy_entry:
             assert found_policy_entry, "Could not find policy entry from parent to new node"
 
-        backup = ((new_node.value * -1) - parent_metadata_of_child['Q']) / (parent.value + 1.01)
+        #backup value computed as if the two distributions have correlation 1 removed the parent value normalization feature
+        #assuming correlation 1 and normal distributions of outcomes: 
+        # the difference between the new node outcome and the parent is normal with mean (new - old) and variance Unew + Uold - 2sqrt(UnewUold)
+        # the expected value of e^that normal is e^(new - old + 1/2(Unew + Uold - 2sqrt(UnewUold)))
+        mean_diff = new_node.value * -1 - parent_metadata_of_child['Q']
+        var_diff = new_node.U + parent_metadata_of_child['U'] - 2 * math.sqrt(new_node.U * parent_metadata_of_child['U'])
+        backup = math.exp(mean_diff + 0.5 * var_diff)
 
-        new_policy_prob = parent_to_node_policy * math.exp(backup)
+        new_policy_prob = parent_to_node_policy * backup
 
         parent.policy[parent_policy_index_of_child] = (move, new_policy_prob, new_node, parent.policy[parent_policy_index_of_child][3])
-        
-        
         
         return
     
