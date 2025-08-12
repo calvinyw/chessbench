@@ -16,7 +16,7 @@ class TTEntry:
     - Lower bound score + depth (for nodes that fail high, score >= beta)
     """
     
-    def __init__(self, static_value: float, policy: List[Tuple[chess.Move, float]], U: float = 0.0, expval: float = 0.0, expoppval: float = 0.0):
+    def __init__(self, static_value: float, policy: List[Tuple[chess.Move, float]], U: float = 0.0, bin_centers: Optional[List[float]] = None, hl_probs: Optional[List[float]] = None):
         """
         Initialize a transposition table entry.
         
@@ -27,8 +27,8 @@ class TTEntry:
         self.static_value = static_value
         self.policy = policy
         self.U = U
-        self.expval = expval
-        self.expoppval = expoppval
+        self.bin_centers = bin_centers if bin_centers is not None else []
+        self.hl_probs = hl_probs if hl_probs is not None else []
         # Exact score entries: (score, depth)
         self.exact_score: Optional[Tuple[float, float]] = None
         
@@ -107,8 +107,8 @@ class Node:
                  value: float = 0.0,
                  policy: Optional[List[Tuple[chess.Move, float]]] = None,
                  U: float = 0.0,
-                 expval: float = 0.0,
-                 expoppval: float = 0.0,
+                 bin_centers: Optional[List[float]] = None,
+                 hl_probs: Optional[List[float]] = None,
                  terminal: bool = False):
         """
         Initialize a new Node in the search tree.
@@ -118,6 +118,9 @@ class Node:
             parent: The parent node (None if this is the root)
             value: Static evaluation of this position
             policy: List of (move, probability) tuples in decreasing probability order
+            U: Uncertainty/variance of the position
+            bin_centers: List of bin center values for the distribution
+            hl_probs: List of probabilities corresponding to each bin center
             terminal: Whether this node is a terminal state (checkmate, stalemate, etc.)
         """
         self.board = board.copy()
@@ -131,8 +134,8 @@ class Node:
             self.policy: List[Tuple[chess.Move, float, Optional['Node'], Dict[str, float]]] = []
         self.terminal = terminal
         self.U = U
-        self.expval = expval
-        self.expoppval = expoppval
+        self.bin_centers = bin_centers if bin_centers is not None else []
+        self.hl_probs = hl_probs if hl_probs is not None else []
         
     def is_root(self) -> bool:
         """Check if this node is the root of the tree (has no parent)."""

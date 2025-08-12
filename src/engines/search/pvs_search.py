@@ -97,8 +97,8 @@ class PVSSearch(SearchAlgorithm):
             'fen': node.board.fen(),
             'value': float(node.value),
             'U': float(node.U),
-            'expval': float(node.expval),
-            'expoppval': float(node.expoppval),
+            'bin_centers': node.bin_centers,
+            'hl_probs': node.hl_probs,
             'is_terminal': node.is_terminal(),
             'potential_children': potential_children,
             'num_potential_children': len(potential_children),
@@ -434,7 +434,7 @@ class PVSSearch(SearchAlgorithm):
         # the expected value of e^that normal is e^(new - old + 1/2(Unew + Uold - 2sqrt(UnewUold)))
         mean_diff = new_node.value * -1 - parent_metadata_of_child['Q']
         var_diff = new_node.U + parent_metadata_of_child['U'] - 2 * math.sqrt(new_node.U * parent_metadata_of_child['U'])
-        backup = math.exp(mean_diff + 0.5 * var_diff)
+        backup = math.exp((mean_diff + 0.5 * var_diff)/2)
 
         new_policy_prob = parent_to_node_policy * backup
 
@@ -442,6 +442,175 @@ class PVSSearch(SearchAlgorithm):
         
         return
     
+    def expected_exp_A_minus_B(bin_centers, A_probs, B_probs):
+        """
+        Compute the integral from 0 to 1 of e^(CDF[A]^(-1)(x) - CDF[B]^(-1)(x))
+        
+        Args:
+            bin_centers: List of values representing the centers of bins for both distributions
+            A_probs: List where i-th entry is probability random variable A lies in i-th bin
+            B_probs: List where i-th entry is probability random variable B lies in i-th bin
+            
+        Returns:
+            float: The computed integral value
+        """
+        import numpy as np
+        
+        # Convert to numpy arrays for easier manipulation
+        bin_centers = np.array(bin_centers)
+        A_probs = np.array(A_probs)
+        B_probs = np.array(B_probs)
+        
+        # Normalize probabilities to sum to 1
+        A_probs = A_probs / np.sum(A_probs)
+        B_probs = B_probs / np.sum(B_probs)
+        
+        # Compute CDFs
+        A_cdf = np.cumsum(A_probs)
+        B_cdf = np.cumsum(B_probs)
+        
+        # Pad with 0 at the beginning for proper CDF
+        A_cdf = np.concatenate([[0], A_cdf])
+        B_cdf = np.concatenate([[0], B_cdf])
+        
+        
+        # Use bucket-based integration approach
+        integral_sum = 0.0
+        current = 0.0
+        
+        # Initialize bucket indices
+        A_bucket_idx = 0
+        B_bucket_idx = 0
+        
+        # Initialize end of next bucket values
+        end_of_next_A_bucket = A_cdf[1] if len(A_cdf) > 1 else 1.0
+        end_of_next_B_bucket = B_cdf[1] if len(B_cdf) > 1 else 1.0
+        
+        while current < 1.0:
+            # Find the next point where either A or B changes buckets
+            next_current = min(end_of_next_A_bucket, end_of_next_B_bucket)
+            
+            # Get current bin centers for A and B
+            A_bin_center = bin_centers[A_bucket_idx]
+            B_bin_center = bin_centers[B_bucket_idx]
+            
+            # Compute the contribution to the integral
+            segment_length = next_current - current
+            exp_value = np.exp(A_bin_center - B_bin_center)
+            integral_sum += segment_length * exp_value
+            
+            # Update current position
+            current = next_current
+            
+            # Update bucket indices and end values based on which bucket boundary was reached
+            if next_current == end_of_next_A_bucket and A_bucket_idx < len(A_cdf) - 1:
+                A_bucket_idx += 1
+                end_of_next_A_bucket = A_cdf[A_bucket_idx + 1] if A_bucket_idx + 1 < len(A_cdf) else 1.0
+            
+            if next_current == end_of_next_B_bucket and B_bucket_idx < len(B_cdf) - 1:
+                B_bucket_idx += 1
+                end_of_next_B_bucket = B_cdf[B_bucket_idx + 1] if B_bucket_idx + 1 < len(B_cdf) else 1.0
+        
+        return float(integral_sum)
+
+    def _full_backpropagate_policy_updates(self, new_node: Node, max_eval: float, move: Optional[chess.Move] = None):
+        """
+        Backpropagate policy updates from a newly created node up to the root.
+        """
+        parent = new_node.parent
+        if parent is None:
+            return
+        
+        # Compute backup values
+        # this is based on the assumption that the two disrtibutions (the parent value and the new node value) have correlation 1
+        #to do this I loop through the pdf of the distributions of values the new node and parent have according to their
+        
+
+        # Compute backup_other_turn using expected_exp_A_minus_B with reversed new_node probabilities
+        backup_other_turn = self.expected_exp_A_minus_B(
+            bin_centers=new_node.bin_centers,
+            A_probs=list(reversed(new_node.hl_probs)),  # Reverse the new node's hl_probs
+            B_probs=parent.hl_probs
+        )
+        
+        # Compute backup_same_turn using expected_exp_A_minus_B
+        backup_same_turn = self.expected_exp_A_minus_B(
+            bin_centers=new_node.bin_centers,
+            A_probs=new_node.hl_probs,
+            B_probs=list(reversed(parent.hl_probs))  # Reverse the parent's hl_probs for same turn
+        )
+        
+        
+        # Safety check for backup values
+        if backup_other_turn > 1 or backup_other_turn < -1:
+            assert False, f"backup_other_turn={backup_other_turn} is outside expected range [-1, 1]"
+        
+        if backup_same_turn > 1 or backup_same_turn < -1:
+            assert False, f"backup_same_turn={backup_same_turn} is outside expected range [-1, 1]"
+
+        
+        
+        # Find the path from parent to root and update policies
+
+        # Find the policy value from parent to the newly created node
+        parent_to_node_policy = 1.0  # Default value
+        found_policy_entry = False
+        for policy_move, prob, _, _ in parent.policy:
+            if policy_move == move:
+                parent_to_node_policy = prob
+                found_policy_entry = True
+                break
+        
+        if not found_policy_entry:
+            assert found_policy_entry, "Could not find policy entry from parent to new node"
+        
+        depth_factor = parent_to_node_policy 
+        
+        current_node = parent
+        distance_from_current = 1  # Distance from the newly created node
+
+        while current_node is not None and current_node.parent is not None:
+            distance_from_current += 1
+            
+            # Find the move that leads from current_node to its parent
+            parent_node = current_node.parent
+            move_to_parent = None
+            policy_value = 1  # Default policy value
+            policy_index = -1
+            
+            for i, (policy_move, policy_prob, policy_child, _) in enumerate(parent_node.policy):
+                if policy_child is current_node:
+                    move_to_parent = policy_move
+                    policy_value = policy_prob
+                    policy_index = i
+                    break
+            
+            if move_to_parent is not None:
+                value_effect = .95 #scalar 0 to 1. 0 is no updating, 1 is full updating.
+
+                if distance_from_current % 2 == 0:  # Even distance from current node #=1 in the other-same swapped version
+                    # Update with backup_same_turn
+                    policy_update = depth_factor * backup_same_turn*value_effect * policy_value
+                    new_policy_prob = policy_value + policy_update
+                else:  # Odd distance from current node
+                    # Update with backup_other_turn
+                    policy_update = depth_factor * backup_other_turn*value_effect * policy_value
+                    new_policy_prob = policy_value + policy_update
+                
+                # Update the policy entry
+                parent_node.policy[policy_index] = (move_to_parent, new_policy_prob, current_node, parent_node.policy[policy_index][3])
+                
+
+                # Update depth_factor recursively
+                depth_factor = depth_factor * policy_value
+
+                #we will normalize only right before we call on a node!
+                #parent_node.normalize()
+            
+            current_node = parent_node
+        
+        return
+
     def _create_node(self, board: chess.Board, inference_func=None, parent: Optional[Node] = None, tt: Dict[str, TTEntry] = None, soft_create: bool = False, parent_move: Optional[chess.Move] = None) -> Node | None:
         """Create a node with static evaluation and policy."""
         position_key = reduced_fen(board)
@@ -462,7 +631,10 @@ class PVSSearch(SearchAlgorithm):
                 terminal_value = 0.0
 
         if terminal_value is not None:
-            new_node = Node(board=board, parent=parent, value=terminal_value, terminal=True, expval = math.exp(terminal_value/2+1/2), expoppval = math.exp(-terminal_value/2+1/2))
+            # Create simple bin_centers and hl_probs for terminal nodes
+            bin_centers = [0.0, 1.0]
+            hl_probs = [1.0 - (terminal_value + 1) / 2, (terminal_value + 1) / 2]  # Convert from [-1,1] to [0,1] probabilities
+            new_node = Node(board=board, parent=parent, value=terminal_value, terminal=True, bin_centers=bin_centers, hl_probs=hl_probs)
             # Assign node ID for logging
             if self.verbose:
                 node_id = self._generate_node_id(board)
@@ -473,7 +645,7 @@ class PVSSearch(SearchAlgorithm):
         # Check transposition table for cached evaluation
         if tt is not None and position_key in tt and tt[position_key] is not None:
             tt_entry = tt[position_key]
-            new_node = Node(board=board, parent=parent, value=tt_entry.static_value, policy=tt_entry.policy, U=tt_entry.U, expval=tt_entry.expval, expoppval=tt_entry.expoppval)
+            new_node = Node(board=board, parent=parent, value=tt_entry.static_value, policy=tt_entry.policy, U=tt_entry.U, bin_centers=tt_entry.bin_centers, hl_probs=tt_entry.hl_probs)
             # Assign node ID for logging
             if self.verbose:
                 node_id = self._generate_node_id(board)
@@ -508,15 +680,11 @@ class PVSSearch(SearchAlgorithm):
         
         wdl_variance = math.sqrt(max(0, hl_variance * 4))
 
-        #E(exp(value)) we compute
-        expval = np.sum(hl_probs * np.exp(bin_centers))
-        expoppval = np.sum(hl_probs * np.exp(1-bin_centers))
-        
-        new_node = Node(board=board, parent=parent, value=value, policy=policy, U=wdl_variance, expval=expval, expoppval=expoppval)
+        new_node = Node(board=board, parent=parent, value=value, policy=policy, U=wdl_variance, bin_centers=bin_centers.tolist(), hl_probs=hl_probs.tolist())
 
         # Store static evaluation in transposition table
         if tt is not None:
-            tt[position_key] = TTEntry(static_value=value, policy=policy, U=wdl_variance, expval=expval, expoppval=expoppval)
+            tt[position_key] = TTEntry(static_value=value, policy=policy, U=wdl_variance, bin_centers=bin_centers.tolist(), hl_probs=hl_probs.tolist())
 
         # Assign node ID for logging
         if self.verbose:
