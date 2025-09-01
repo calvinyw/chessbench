@@ -2105,6 +2105,19 @@ class Board {
 
         if (move.typeOf() == Move::CASTLING) {
             assert(at<PieceType>(move.from()) == PieceType::KING);
+            if (!(at<PieceType>(move.to()) == PieceType::ROOK)) {
+                std::cerr << "[chess] CASTLING precondition failed: expected ROOK at " << move.to()
+                          << ", got " << at<PieceType>(move.to()) << "\n";
+                std::string move_str;
+                move_str += static_cast<std::string>(move.from());
+                move_str += static_cast<std::string>(move.to());
+                if (move.typeOf() == Move::PROMOTION) {
+                    move_str += static_cast<std::string>(move.promotionType());
+                }
+                std::cerr << "[chess] Move: " << move_str << " (type=" << move.typeOf() << ")\n";
+                std::cerr << "[chess] FEN: " << getFen() << "\n";
+                assert(false && "Expected rook on castling target square");
+            }
             assert(at<PieceType>(move.to()) == PieceType::ROOK);
 
             const bool king_side = move.to() > move.from();
