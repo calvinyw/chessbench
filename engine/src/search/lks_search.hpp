@@ -24,6 +24,7 @@
 #include <array>
 #include <string>
 #include <tbb/concurrent_hash_map.h>
+#include "../parallel/concurrent_position_queue.hpp"
 
 // Syzygy helpers
 #include "../syzygy_helpers.hpp"
@@ -47,6 +48,19 @@ public:
         : SearchAlgo(options, time_handler), board_(), evaluator_(options),
           pool_(static_cast<std::size_t>(32u)) {
         evaluator_.start();
+        // Wire prefetch: let evaluator top up underfilled batches from our queue and cache results
+        evaluator_.set_prefetch_queue(&position_queue_);
+        evaluator_.set_prefetch_min_batch_size(12);
+        evaluator_.set_prefetch_sink([this](engine_parallel::PositionTask task, engine_parallel::EvalResult er){
+            if (!er.canceled) {
+                (void)build_from_eval_and_cache(task.board, er);
+            }
+        });
+        evaluator_.set_tt_query([this](const chess::Board& board) -> bool {
+            const std::string key = board.getFen(false);
+            TTMap::const_accessor acc;
+            return tt_.find(acc, key);
+        });
     }
 
     ~LksSearch() override {
@@ -262,6 +276,16 @@ public:
         if (is_leaf_node(node)) {
             if (depth <= std::log(static_cast<float>(std::max(0, unexpanded_count)) + 1e-6f) + node_depth_reduction) {
                 update_tt(node.board, alpha0, beta0, depth, node.value);
+                // Enqueue the highest-policy child position for later processing
+                if (!node.policy.empty()) {
+                    const chess::Move top_move = node.policy[0].move;
+                    if (top_move != chess::Move::NO_MOVE) {
+                        chess::Board child = node.board;
+                        child.makeMove(top_move);
+                        float priority = depth + std::log(node.policy[0].policy + 1e-6f) + 2.0f * std::log(node.policy[0].U + 1e-6f);
+                        position_queue_.push(std::move(child), priority);
+                    }
+                }
                 co_return SearchOutcome{node.value, chess::Move::NO_MOVE, false};
             }
 
@@ -676,6 +700,7 @@ private:
     engine_parallel::NNEvaluator evaluator_;
     cppcoro::static_thread_pool pool_;
     
+    engine_parallel::ConcurrentPositionQueue position_queue_;
     std::unique_ptr<LKSNode> root_;
     std::atomic<std::uint64_t> stat_gpu_evaluations_{0};
     std::atomic<std::uint64_t> stat_nodes_created_{0};

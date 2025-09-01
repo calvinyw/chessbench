@@ -25,6 +25,8 @@
 #include "tokenizer.hpp"
 #include <cppcoro/task.hpp>
 #include "options.hpp"
+#include "concurrent_position_queue.hpp"
+#include "chess.hpp"
 
 namespace engine_parallel {
 
@@ -75,6 +77,12 @@ public:
         cv.notify_one();
     }
 
+    // Optional: provide a prefetch queue and sink so we can fill underfilled batches
+    void set_prefetch_queue(engine_parallel::ConcurrentPositionQueue* q) { prefetch_queue_ = q; }
+    void set_prefetch_sink(std::function<void(engine_parallel::PositionTask, EvalResult)> sink) { prefetch_sink_ = std::move(sink); }
+    void set_prefetch_min_batch_size(std::size_t n) { prefetch_min_batch_size_ = n; }
+    void set_tt_query(std::function<bool(const chess::Board&)> tt_query) { tt_query_ = std::move(tt_query); }
+
 private:
     std::mutex mutex;
     std::condition_variable cv;
@@ -86,6 +94,12 @@ private:
     std::atomic<bool> stop{false};
     std::jthread worker;
     const engine::Options* options_{nullptr};
+
+    // Prefetch configuration (not owning)
+    engine_parallel::ConcurrentPositionQueue* prefetch_queue_{nullptr};
+    std::function<void(engine_parallel::PositionTask, EvalResult)> prefetch_sink_{};
+    std::function<bool(const chess::Board&)> tt_query_{};
+    std::size_t prefetch_min_batch_size_{5};
 
     // TensorRT objects
     nvinfer1::IRuntime* trt_runtime{nullptr};
@@ -410,6 +424,28 @@ private:
                 while (!queue.empty() && batch.size() < to_take) {
                     batch.push_back(std::move(queue.front()));
                     queue.pop();
+                }
+            }
+
+            // If batch is underfilled and we have a prefetch queue, top up from it
+            if (!stop.load(std::memory_order_acquire)
+                && prefetch_queue_
+                && prefetch_min_batch_size_ > batch.size()
+                && prefetch_sink_) {
+                std::size_t can_top_up = std::min<std::size_t>(prefetch_min_batch_size_ - batch.size(), kBatchSize - batch.size());
+                for (std::size_t i = 0; i < can_top_up; ++i) {
+                    engine_parallel::PositionTask task;
+                    if (!prefetch_queue_->try_pop(task)) break;
+                    
+                    // Check if position is already in transposition table
+                    if (tt_query_ && tt_query_(task.board)) {
+                        continue; // Skip this position, try next one
+                    }
+                    
+                    auto tokens = engine_tokenizer::tokenizeBoard(task.board);
+                    batch.push_back(Request{tokens, [this, t = std::move(task)](EvalResult er) mutable {
+                        if (prefetch_sink_) prefetch_sink_(std::move(t), std::move(er));
+                    }});
                 }
             }
 
